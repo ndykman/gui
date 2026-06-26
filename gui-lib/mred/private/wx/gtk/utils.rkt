@@ -64,17 +64,15 @@
 (define gdk-lib 
   (case (system-type)
     [(windows)
-     (ffi-lib "libatk-1.0-0")
-     (ffi-lib "libgio-2.0-0")
-     (ffi-lib "libgdk_pixbuf-2.0-0")
-     (ffi-lib "libgdk-win32-2.0-0")]
+     (ffi-lib "atk-1.0-0")
+     (ffi-lib "gdk-3-vs17")]
     [else (if gtk3?
 	      (get-gdk3-lib)
 	      (ffi-lib "libgdk-x11-2.0" '("0" "")))]))
 (define gdk_pixbuf-lib 
   (case (system-type)
     [(windows)
-     (ffi-lib "libgdk_pixbuf-2.0-0")]
+     (ffi-lib "gdk_pixbuf-2.0-0")]
     [(unix)
      (if gtk3?
 	 #f
@@ -83,7 +81,7 @@
 (define gtk-lib
   (case (system-type)
     [(windows) 
-     (ffi-lib "libgtk-win32-2.0-0")]
+     (ffi-lib "gtk-3-vs17")]
     [else (if gtk3?
 	      (get-gtk3-lib)
 	      (ffi-lib "libgtk-x11-2.0" '("0" "")))]))

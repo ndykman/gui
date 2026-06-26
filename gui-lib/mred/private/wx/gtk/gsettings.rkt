@@ -17,7 +17,7 @@
   [(macosx)
    (ffi-lib "libgio-2.0.0.dylib")]
   [(windows) 
-   (ffi-lib "libgio-2.0-0.dll")])
+   (ffi-lib "gio-2.0-0.dll")])
 
 (define-ffi-definer define-gio gio-lib
   #:default-make-fail (lambda (id) (lambda () #f)))
