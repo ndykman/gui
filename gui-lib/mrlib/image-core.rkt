@@ -140,6 +140,7 @@ has been moved out).
 ;;                  angle positive-real 
 ;;                  hash[(list boolean[flip] number[x-scale] number[y-scale] number[angle])
 ;;                       -o> (is-a?/c bitmap%)])
+;;                    also, hash["png-bytes"] ∈ bytes, recording the png bytes for this bitmap
 ;;    NOTE: bitmap copying needs to happen in 'write' and 'read' methods
 (define-struct/reg-mk ibitmap #:reflect-id bitmap (raw-bitmap angle x-scale y-scale cache)
   #:omit-define-syntaxes #:transparent
@@ -527,8 +528,7 @@ has been moved out).
 
 (define (image->snipclass-bytes img)
   (define bp (open-output-bytes))
-  (parameterize ([print-graph #t]
-                 [bitmap-write-cache (make-hasheq)])
+  (parameterize ([print-graph #t])
     (:write (list (send img get-shape)
                   (send img get-bb)
                   (send img get-pinhole))
@@ -545,6 +545,7 @@ has been moved out).
 (define (set-box/f! b v) (when (box? b) (set-box! b v)))
  
 (define (parse sexp)
+  (define png-bytes-cache (make-hash))
   (let/ec k
     (let loop ([sexp sexp])
       (cond
@@ -561,9 +562,15 @@ has been moved out).
                 ;; and the bytes in the first element were the raw bytes (from get-argb-pixels)
                 ;; in the current version, the bytes are png bytes and there are two elements
                 ;; in the vector; the second is the backing scale
-                (if (= (vector-length sexp) 3)
-                    (apply bytes->bitmap (vector->list sexp))
-                    (apply png-bytes->bitmap (vector->list sexp)))]
+                (cond
+                  [(= (vector-length sexp) 3)
+                   (apply bytes->bitmap (vector->list sexp))]
+                  [else
+                   (define bmp (apply png-bytes->bitmap (vector->list sexp)))
+                   ;; when we read the bitmap in as png bytes, stash the bytes
+                   ;; so the enclosing call can save them in the `ibitmap` struct
+                   (hash-set! png-bytes-cache bmp sexp)
+                   bmp])]
                [else
                 (let* ([tag (vector-ref sexp 0)]
                        [args (cdr (vector->list sexp))]
@@ -608,7 +615,13 @@ has been moved out).
                        [else
                         (constructor width height angle mode color #f)])]
                     [(and constructor (procedure-arity-includes? constructor arg-count))
-                     (apply constructor parsed-args)]
+                     (define ans (apply constructor parsed-args))
+                     (when (ibitmap? ans)
+                       ;; populate the ibitmap cache (if possible) to make saving faster
+                       (define cached-png-bytes (hash-ref png-bytes-cache (ibitmap-raw-bitmap ans) #f))
+                       (when cached-png-bytes
+                         (hash-set! (ibitmap-cache ans) "png-bytes" cached-png-bytes)))
+                     ans]
                     [(and (eq? tag 'struct:bitmap)
                           (= arg-count 7))
                      ;; we changed the arity of the bitmap constructor from old versions,
@@ -1800,7 +1813,6 @@ the mask bitmap and the original bitmap are all together in a single bytes!
               (make-bb w h h)
               #f))
 
-(define bitmap-write-cache (make-parameter #f))
 (define (bitmap-write bitmap port mode)
   (define v (struct->vector bitmap))
   (define recur
@@ -1810,13 +1822,13 @@ the mask bitmap and the original bitmap are all together in a single bytes!
       [else (lambda (p port) (print p port mode))]))
 
   (define (to-bytes o)
-    (define cache (bitmap-write-cache))
-    (define already-gotten-bytes (and cache (hash-ref cache o #f)))
     (cond
-      [already-gotten-bytes already-gotten-bytes]
+      [(hash-ref (ibitmap-cache bitmap) "png-bytes" #f)
+       =>
+       (λ (x) x)]
       [else
        (define res (call-with-values (λ () (bitmap->png-bytes o)) vector))
-       (when cache (hash-set! cache o res))
+       (hash-set! (ibitmap-cache bitmap) "png-bytes" res)
        res]))
 
   (define (update i)
