@@ -474,13 +474,25 @@ has been moved out).
         (set-box/f! rspace 0)))
 
     (define/override (write f)
-      (define bytes (image->snipclass-bytes this))
-      (send f put (bytes-length bytes) bytes))
+      (define separately-written-bytes-ht (make-hash))
+      (define image-bytes
+        (parameterize ([snipclass-bytes->image-separately-written-bytes separately-written-bytes-ht])
+          (image->snipclass-bytes this)))
+      (let ([key #"bmps-then-parsed"])
+        (send f put (bytes-length key) key))
+      (define bitmaps-count (hash-count separately-written-bytes-ht))
+      (send f put bitmaps-count)
+      (for ([i (in-range bitmaps-count)])
+        (define bytes (hash-ref separately-written-bytes-ht i))
+        (send f put (bytes-length bytes) bytes))
+      (send f put (bytes-length image-bytes) image-bytes))
     
     (super-new)
     
     (inherit set-snipclass)
     (set-snipclass snip-class)))
+
+(define snipclass-bytes->image-separately-written-bytes (make-parameter #f))
 
 (define (definitely-same-image? i1 i2)
   (cond
@@ -509,7 +521,20 @@ has been moved out).
 (define racket/base:read read)
 (define image-snipclass% 
   (class snip-class%
-    (define/override (read f) (snipclass-bytes->image (send f get-unterminated-bytes)))
+    (define/override (read f)
+      (define bts (send f get-unterminated-bytes))
+      (define-values (new-bts separately-written-bytes-ht)
+        (cond
+          [(equal? bts #"bmps-then-parsed")
+           (define bytes-count (send f get-exact))
+           (define separately-written-bytes-ht (make-hash))
+           (for ([i (in-range bytes-count)])
+             (hash-set! separately-written-bytes-ht i (send f get-unterminated-bytes)))
+           (values (send f get-unterminated-bytes) separately-written-bytes-ht)]
+          [else
+           (values bts #f)]))
+      (parameterize ([snipclass-bytes->image-separately-written-bytes separately-written-bytes-ht])
+        (snipclass-bytes->image new-bts)))
     (super-new)))
 
 (define (snipclass-bytes->image bytes)
@@ -558,10 +583,10 @@ has been moved out).
              (cond
                [(bytes? (vector-ref sexp 0))
                 ;; bitmaps are vectors with a bytes in the first field
-                ;; in older versions, there were three elements of the vector
-                ;; and the bytes in the first element were the raw bytes (from get-argb-pixels)
-                ;; in the current version, the bytes are png bytes and there are two elements
-                ;; in the vector; the second is the backing scale
+                ;; in much older versions, there were three elements of the vector
+                ;;    and the bytes in the first element were the raw bytes (from get-argb-pixels)
+                ;; in older versions, the bytes are png bytes and there are two elements
+                ;;    in the vector; the second is the backing scale
                 (cond
                   [(= (vector-length sexp) 3)
                    (apply bytes->bitmap (vector->list sexp))]
@@ -571,6 +596,26 @@ has been moved out).
                    ;; so the enclosing call can save them in the `ibitmap` struct
                    (hash-set! png-bytes-cache bmp sexp)
                    bmp])]
+               [(equal? (vector-ref sexp 0) 'separately-written-bytes)
+                ;; in the current version, the bytes are written separately and
+                ;; will be in the hash that's in the `separately-written-bytes`
+                ;; parameter, with the vector containing being a natural that
+                ;; is the key into the hash and the backing scale
+                (define separately-written-bytes-ht (snipclass-bytes->image-separately-written-bytes))
+                (cond
+                  [separately-written-bytes-ht
+                   (define index (vector-ref sexp 1))
+                   (define backing-scale (vector-ref sexp 2))
+                   (define fixed-up-vector
+                     (vector (hash-ref separately-written-bytes-ht index)
+                             backing-scale))
+                   (define bmp
+                     (apply png-bytes->bitmap (vector->list fixed-up-vector)))
+                   (hash-set! png-bytes-cache bmp fixed-up-vector)
+                   bmp]
+                  [else
+                   ;; here something went wrong; just make a bogus bitmap
+                   (make-bitmap 10 10)])]
                [else
                 (let* ([tag (vector-ref sexp 0)]
                        [args (cdr (vector->list sexp))]
@@ -1821,8 +1866,12 @@ the mask bitmap and the original bitmap are all together in a single bytes!
       [(#f) display]
       [else (lambda (p port) (print p port mode))]))
 
-  (define (to-bytes o)
+  ;; update the bitmap to png bytes
+  (define the-bitmap-index 1)
+  (define o (vector-ref v the-bitmap-index))
+  (define nv
     (cond
+      [(not o) #f]
       [(hash-ref (ibitmap-cache bitmap) "png-bytes" #f)
        =>
        (λ (x) x)]
@@ -1830,13 +1879,18 @@ the mask bitmap and the original bitmap are all together in a single bytes!
        (define res (call-with-values (λ () (bitmap->png-bytes o)) vector))
        (hash-set! (ibitmap-cache bitmap) "png-bytes" res)
        res]))
+  (cond
+    [(and nv (snipclass-bytes->image-separately-written-bytes))
+     =>
+     (λ (separately-written-bytes-ht)
+       (define the-bytes (vector-ref nv 0))
+       (define backing-scale (vector-ref nv 1))
+       (define k (hash-count separately-written-bytes-ht))
+       (hash-set! separately-written-bytes-ht k the-bytes)
+       (vector-set! v the-bitmap-index (vector 'separately-written-bytes k backing-scale)))]
+    [else
+     (vector-set! v the-bitmap-index nv)])
 
-  (define (update i)
-    (define o (vector-ref v i))
-    (define nv (and o (to-bytes o)))
-    (vector-set! v i nv))
-
-  (update 1)
   ;; don't save the cache
   (vector-set! v 5 (make-hash))
   (recur v port))
@@ -1911,7 +1965,7 @@ the mask bitmap and the original bitmap are all together in a single bytes!
          curve-segment->path
          mode-color->pen
          
-         snipclass-bytes->image
+         snipclass-bytes->image snipclass-bytes->image-separately-written-bytes
          image->snipclass-bytes
          (contract-out
           [definitely-same-image? (-> image? image? boolean?)])
